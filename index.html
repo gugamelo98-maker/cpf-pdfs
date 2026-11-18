@@ -36,8 +36,11 @@ table{width:100%;border-collapse:collapse;font-size:.88rem}
 th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 th{color:var(--muted);font-weight:600}
 td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
+td.st{max-width:340px;overflow:hidden;text-overflow:ellipsis}
 .note{font-size:.85rem;color:var(--muted);margin-top:8px}
 #msg{font-size:.9rem;margin-top:10px;white-space:pre-wrap}
+#erros{font-size:.88rem;margin-top:12px}
+#erros div{padding:3px 0}
 </style>
 </head>
 <body>
@@ -50,11 +53,12 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
     <div class="grid">
       <div><label for="url">URL do webhook (Production URL)</label>
         <input id="url" type="text" placeholder="https://seu-n8n.com/webhook/extrair-cpf"></div>
-      <div><label for="chunk">Links por lote</label><input id="chunk" type="number" min="1" max="100" value="20"></div>
-      <div><label for="conc">Lotes simultâneos</label><input id="conc" type="number" min="1" max="12" value="5"></div>
+      <div><label for="chunk">Links por lote</label><input id="chunk" type="number" min="1" max="100" value="10"></div>
+      <div><label for="conc">Máx. de lotes simultâneos</label><input id="conc" type="number" min="1" max="12" value="4"></div>
     </div>
     <div class="row"><button class="ghost" id="btnTest">Testar conexão</button></div>
     <div id="msg"></div>
+    <div class="note">A velocidade se ajusta sozinha: começa devagar, acelera enquanto tudo dá certo (até o máximo acima) e reduz quando aparecem erros.</div>
   </div>
 
   <div class="card">
@@ -78,9 +82,11 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
       <div class="stat"><b class="ok" id="sOk">0</b><span>com CPF</span></div>
       <div class="stat"><b class="warn" id="sNo">0</b><span>sem CPF</span></div>
       <div class="stat"><b class="bad" id="sErr">0</b><span>com erro</span></div>
+      <div class="stat"><b id="sConc">–</b><span>lotes simultâneos agora</span></div>
       <div class="stat"><b id="sRate">–</b><span>PDFs por minuto</span></div>
       <div class="stat"><b id="sEta">–</b><span>tempo restante</span></div>
     </div>
+    <div id="erros"></div>
     <div class="row">
       <button id="btnStart">Iniciar / Continuar</button>
       <button class="ghost" id="btnPause" disabled>Pausar</button>
@@ -93,7 +99,7 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
       </select>
       <button id="btnCsv">Baixar CSV</button>
     </div>
-    <div class="note">O progresso fica salvo neste navegador: dá para fechar e continuar depois, no mesmo computador e na mesma pasta do arquivo.</div>
+    <div class="note">Ao terminar, os links com erro são reprocessados automaticamente até 3 vezes, com menos velocidade. O progresso fica salvo neste navegador: dá para fechar e continuar depois, no mesmo computador e na mesma pasta do arquivo.</div>
   </div>
 
   <div class="card">
@@ -109,8 +115,9 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
 <script>
 (function(){
   var $=function(id){return document.getElementById(id)};
-  var S={links:[],results:{},running:false,paused:false,cfg:{url:"",chunk:20,conc:5}};
-  var sessStart=0,sessDone=0,lastSave=0;
+  var CFG_V=3;
+  var S={links:[],results:{},running:false,paused:false,cfg:{v:CFG_V,url:"",chunk:10,conc:4}};
+  var sessStart=0,sessDone=0,lastSave=0,cur=1,cool=0,okStreak=0,chunkFailed=false,passInfo="";
 
   /* ---------- persistência (IndexedDB) ---------- */
   function idb(){return new Promise(function(res,rej){var r=indexedDB.open("extrator-cpf-n8n",1);r.onupgradeneeded=function(){r.result.createObjectStore("kv")};r.onsuccess=function(){res(r.result)};r.onerror=function(){rej(r.error)}})}
@@ -122,74 +129,115 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
   function sleep(ms){return new Promise(function(r){setTimeout(r,ms)})}
   function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
   function msg(t,cls){var m=$("msg");m.textContent=t;m.className=cls||""}
-  function isErr(r){return r&&String(r.status).indexOf("erro")===0}
-  function isNoCpf(r){return r&&!isErr(r)&&r.status!=="ok"}
-  function norm(d){return{nome:d.nome||"",cpf:d.cpf||"",cpf_valido:d.cpf_valido||"",telefone:d.telefone||"",proposta:d.proposta||"",status:d.status||(d.cpf?"ok":"CPF não encontrado")}}
+  function isErr(r){return !!r&&String(r.status).indexOf("erro")===0}
+  function isNoCpf(r){return !!r&&!isErr(r)&&r.status!=="ok"}
+  function erro(m){return{nome:"",cpf:"",cpf_valido:"",telefone:"",proposta:"",detalhe:"",status:"erro: "+m}}
+  function norm(d){return{nome:d.nome||"",cpf:d.cpf||"",cpf_valido:d.cpf_valido||"",telefone:d.telefone||"",proposta:d.proposta||"",detalhe:d.detalhe||"",status:d.status||(d.cpf?"ok":"CPF não encontrado")}}
   function fmtTime(s){if(!isFinite(s)||s<0)return"–";var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?h+"h "+m+"min":m?m+" min":Math.ceil(s)+" s"}
 
   /* ---------- envio de um lote ---------- */
   async function enviar(links){
-    var r=await fetch(S.cfg.url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({links:links})});
-    if(!r.ok)throw new Error("HTTP "+r.status);
-    var data=await r.json();
-    if(data&&!Array.isArray(data))data=Array.isArray(data.data)?data.data:[data];
-    return data||[];
+    var ctrl=new AbortController(),t=setTimeout(function(){ctrl.abort()},110000);
+    try{
+      var r=await fetch(S.cfg.url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({links:links}),signal:ctrl.signal});
+      if(!r.ok)throw new Error("n8n respondeu HTTP "+r.status);
+      var data=await r.json();
+      if(data&&!Array.isArray(data))data=Array.isArray(data.data)?data.data:[data];
+      return data||[];
+    }catch(e){
+      if(e.name==="AbortError")throw new Error("tempo esgotado (110 s)");
+      throw e;
+    }finally{clearTimeout(t)}
   }
+  // Processa um lote. Se o lote inteiro falhar, divide ao meio e tenta de novo; link isolado tem 3 tentativas.
   async function processChunk(links){
-    for(var a=1;a<=3;a++){
+    var lastErr,tries=links.length>1?1:3;
+    for(var a=0;a<tries;a++){
       try{
-        var data=await enviar(links),got={};
+        var data=await enviar(links),got={},errs=0;
         data.forEach(function(d){if(d&&d.link)got[d.link]=d});
-        links.forEach(function(l){S.results[l]=got[l]?norm(got[l]):{status:"erro: n8n não devolveu este link",nome:"",cpf:"",telefone:"",proposta:""}});
-        sessDone+=links.length;return;
-      }catch(e){
-        if(a===3){links.forEach(function(l){S.results[l]={status:"erro: "+e.message,nome:"",cpf:"",telefone:"",proposta:""}});sessDone+=links.length;return}
-        await sleep(2000*a);
+        links.forEach(function(l){var r=got[l]?norm(got[l]):erro("o n8n não devolveu este link");S.results[l]=r;if(isErr(r))errs++});
+        sessDone+=links.length;return errs;
+      }catch(e){lastErr=e;chunkFailed=true;await sleep(2000*(a+1))}
+    }
+    if(links.length>1){
+      var h=Math.ceil(links.length/2);
+      var x=await processChunk(links.slice(0,h)),y=await processChunk(links.slice(h));
+      return x+y;
+    }
+    S.results[links[0]]=erro(lastErr?lastErr.message:"falha desconhecida");sessDone++;return 1;
+  }
+  // Ajuste automático de velocidade
+  function adapt(errs,n,maxConc){
+    var ratio=chunkFailed?1:errs/n;chunkFailed=false;
+    if(ratio>=0.3){cur=Math.max(1,Math.floor(cur/2));cool=Date.now()+8000;okStreak=0}
+    else if(ratio===0){okStreak++;if(okStreak>=4&&cur<maxConc){cur++;okStreak=0}}
+    else okStreak=0;
+  }
+  async function runPass(pend,size,maxConc){
+    var chunks=[];for(var i=0;i<pend.length;i+=size)chunks.push(pend.slice(i,i+size));
+    var idx=0;cur=Math.min(2,maxConc);okStreak=0;
+    async function worker(i){
+      while(!S.paused){
+        if(idx>=chunks.length)break;
+        if(i>=cur||Date.now()<cool){await sleep(500);continue}
+        var c=chunks[idx++];if(!c)break;
+        var e=await processChunk(c);
+        adapt(e,c.length,maxConc);
+        if(Date.now()-lastSave>5000)save();
       }
     }
+    var ws=[];for(var w=0;w<maxConc;w++)ws.push(worker(w));
+    await Promise.all(ws);
   }
 
   async function start(){
     if(S.running)return;
     readCfg();
     if(!/^https?:\/\//.test(S.cfg.url)){msg("Preencha a URL do webhook.","bad");return}
-    var pend=S.links.filter(function(l){return !S.results[l]});
-    if(!pend.length){msg("Nada pendente. Adicione links ou use “Reprocessar erros”.","muted");return}
-    var chunks=[];for(var i=0;i<pend.length;i+=S.cfg.chunk)chunks.push(pend.slice(i,i+S.cfg.chunk));
+    if(!S.links.filter(function(l){return !S.results[l]}).length){msg("Nada pendente. Adicione links ou use “Reprocessar erros”.","muted");return}
     S.running=true;S.paused=false;sessStart=Date.now();sessDone=0;msg("");ui();
-    var idx=0;
-    async function worker(){
-      while(!S.paused){
-        var c=chunks[idx++];if(!c)break;
-        await processChunk(c);
-        if(Date.now()-lastSave>5000)save();
-      }
+    var pass=0;
+    while(!S.paused){
+      var pend=S.links.filter(function(l){return !S.results[l]});
+      if(!pend.length)break;
+      passInfo=pass?("Rodada "+(pass+1)+" de 4: reprocessando erros com menos velocidade"):"";
+      if(passInfo)msg(passInfo,"muted");
+      await runPass(pend,pass?Math.min(5,S.cfg.chunk):S.cfg.chunk,pass?Math.min(2,S.cfg.conc):S.cfg.conc);
+      if(S.paused)break;
+      var errs=S.links.filter(function(l){return isErr(S.results[l])});
+      if(!errs.length||pass>=3)break;
+      errs.forEach(function(l){delete S.results[l]});
+      pass++;await save();await sleep(5000);
     }
-    var ws=[];for(var w=0;w<S.cfg.conc;w++)ws.push(worker());
-    await Promise.all(ws);
-    S.running=false;await save();ui();
-    msg(S.paused?"Pausado. Clique em Iniciar / Continuar para seguir.":"Concluído.","ok");
+    S.running=false;passInfo="";await save();ui();
+    var left=S.links.filter(function(l){return isErr(S.results[l])}).length;
+    msg(S.paused?"Pausado. Clique em Iniciar / Continuar para seguir.":left?"Concluído, mas "+left+" link(s) seguem com erro. Veja os motivos acima.":"Concluído.",left?"warn":"ok");
   }
 
   /* ---------- interface ---------- */
   function ui(){
-    var total=S.links.length,done=0,ok=0,no=0,er=0;
-    S.links.forEach(function(l){var r=S.results[l];if(!r)return;done++;if(isErr(r))er++;else if(isNoCpf(r))no++;else ok++});
+    var total=S.links.length,done=0,ok=0,no=0,er=0,motivos={};
+    S.links.forEach(function(l){var r=S.results[l];if(!r)return;done++;
+      if(isErr(r)){er++;var k=String(r.status).replace(/^erro:\s*/,"").slice(0,90);motivos[k]=(motivos[k]||0)+1}
+      else if(isNoCpf(r))no++;else ok++});
     $("sTotal").textContent=total;$("sDone").textContent=done;$("sOk").textContent=ok;$("sNo").textContent=no;$("sErr").textContent=er;
     $("prog").style.width=(total?done/total*100:0)+"%";
     var eta="–",rpm="–";
     if(S.running&&sessDone>0){var rate=sessDone/((Date.now()-sessStart)/1000);eta=fmtTime((total-done)/rate);rpm=Math.round(rate*60)}
-    $("sEta").textContent=eta;$("sRate").textContent=rpm;
+    $("sEta").textContent=eta;$("sRate").textContent=rpm;$("sConc").textContent=S.running?cur:"–";
+    var top=Object.keys(motivos).sort(function(a,b){return motivos[b]-motivos[a]}).slice(0,5);
+    $("erros").innerHTML=top.length?"<strong class='bad'>Principais motivos de erro:</strong>"+top.map(function(k){return "<div><b>"+motivos[k]+"×</b> "+esc(k)+"</div>"}).join(""):"";
     $("totalInfo").textContent=total?total+" link(s) na fila":"";
     $("btnStart").disabled=S.running;$("btnPause").disabled=!S.running;$("btnRetry").disabled=S.running;
     var keys=Object.keys(S.results).slice(-200).reverse();
     $("tb").innerHTML=keys.map(function(l){var r=S.results[l],c=isErr(r)?"bad":isNoCpf(r)?"warn":"ok";
-      return "<tr><td>"+esc(r.proposta)+"</td><td>"+esc(r.nome)+"</td><td class='cpf'>"+esc(r.cpf)+"</td><td>"+esc(r.telefone)+"</td><td class='"+c+"'>"+esc(r.status)+"</td></tr>"}).join("");
+      return "<tr><td>"+esc(r.proposta)+"</td><td>"+esc(r.nome)+"</td><td class='cpf'>"+esc(r.cpf)+"</td><td>"+esc(r.telefone)+"</td><td class='st "+c+"' title='"+esc(r.status+(r.detalhe?" — "+r.detalhe:""))+"'>"+esc(r.status)+"</td></tr>"}).join("");
   }
   function readCfg(){
     S.cfg.url=$("url").value.trim();
-    S.cfg.chunk=Math.min(100,Math.max(1,parseInt($("chunk").value)||20));
-    S.cfg.conc=Math.min(12,Math.max(1,parseInt($("conc").value)||5));
+    S.cfg.chunk=Math.min(100,Math.max(1,parseInt($("chunk").value)||10));
+    S.cfg.conc=Math.min(12,Math.max(1,parseInt($("conc").value)||4));
   }
   function addLinks(text){
     var found=text.match(/https?:\/\/[^\s",;<>]+/g)||[],set={},n=0;
@@ -200,7 +248,7 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
 
   /* ---------- CSV ---------- */
   function baixarCsv(){
-    var f=$("filtro").value,H=["proposta","nome","cpf","cpf_valido","telefone","status","link"];
+    var f=$("filtro").value,H=["proposta","nome","cpf","cpf_valido","telefone","status","detalhe","link"];
     var rows=S.links.filter(function(l){var r=S.results[l];if(!r)return false;
       if(f==="ok")return !isErr(r)&&!isNoCpf(r);if(f==="bad")return isErr(r)||isNoCpf(r);return true})
       .map(function(l){var r=S.results[l];return H.map(function(h){var v=h==="link"?l:r[h];return '"'+String(v==null?"":v).replace(/"/g,'""')+'"'}).join(";")});
@@ -235,7 +283,8 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
 
   (async function init(){
     var st=await kvGet("state");
-    if(st){S.links=st.links||[];S.results=st.results||{};S.cfg=Object.assign(S.cfg,st.cfg||{})}
+    if(st){S.links=st.links||[];S.results=st.results||{};
+      if(st.cfg){S.cfg.url=st.cfg.url||"";if(st.cfg.v===CFG_V){S.cfg.chunk=st.cfg.chunk;S.cfg.conc=st.cfg.conc}}}
     $("url").value=S.cfg.url;$("chunk").value=S.cfg.chunk;$("conc").value=S.cfg.conc;ui();
   })();
 })();
