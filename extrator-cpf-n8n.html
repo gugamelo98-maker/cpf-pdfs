@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extrator de CPF · n8n</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#15181d;--muted:#5d6672;--line:#dfe3e8;--accent:#1f6feb;--ok:#18794e;--bad:#b42318;--warn:#a15c00}
+@media (prefers-color-scheme:dark){:root{--bg:#101216;--card:#181b21;--text:#eceff3;--muted:#98a2b0;--line:#2b303a;--accent:#5b9bff;--ok:#4cc38a;--bad:#ff8077;--warn:#f0b04c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:980px;margin:0 auto;padding:24px 16px 60px}
+h1{font-size:1.5rem;margin:0 0 4px}
+h2{font-size:1rem;margin:0 0 10px}
+p.sub{color:var(--muted);margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+label{display:block;font-size:.85rem;color:var(--muted);margin-bottom:4px}
+input[type=text],input[type=number],textarea,select{width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font:inherit;font-size:.9rem}
+textarea{min-height:110px;resize:vertical}
+.grid{display:grid;grid-template-columns:3fr 1fr 1fr;gap:12px}
+@media(max-width:640px){.grid{grid-template-columns:1fr}}
+button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}
+button.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.spacer{flex:1}
+.bar{height:12px;background:var(--line);border-radius:99px;overflow:hidden;margin:6px 0 12px}
+.bar>div{height:100%;width:0;background:var(--accent);transition:width .3s}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.stat{border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.stat b{display:block;font-size:1.25rem}
+.stat span{font-size:.8rem;color:var(--muted)}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.muted{color:var(--muted)}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-weight:600}
+td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
+.note{font-size:.85rem;color:var(--muted);margin-top:8px}
+#msg{font-size:.9rem;margin-top:10px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<main>
+  <h1>Extrator de CPF · n8n</h1>
+  <p class="sub">Envia os links em lotes para o seu fluxo no n8n e monta o CSV com nome, CPF, telefone e proposta.</p>
+
+  <div class="card">
+    <h2>1. Conexão com o n8n</h2>
+    <div class="grid">
+      <div><label for="url">URL do webhook (Production URL)</label>
+        <input id="url" type="text" placeholder="https://seu-n8n.com/webhook/extrair-cpf"></div>
+      <div><label for="chunk">Links por lote</label><input id="chunk" type="number" min="1" max="50" value="10"></div>
+      <div><label for="conc">Lotes simultâneos</label><input id="conc" type="number" min="1" max="6" value="2"></div>
+    </div>
+    <div class="row"><button class="ghost" id="btnTest">Testar conexão</button></div>
+    <div id="msg"></div>
+  </div>
+
+  <div class="card">
+    <h2>2. Links dos PDFs</h2>
+    <textarea id="txt" placeholder="Cole os links aqui (um por linha) ou carregue um arquivo .txt / .csv"></textarea>
+    <div class="row">
+      <button id="btnAdd">Adicionar links</button>
+      <button class="ghost" id="btnFile">Carregar arquivo…</button>
+      <input id="file" type="file" accept=".txt,.csv,text/plain,text/csv" hidden>
+      <span class="muted" id="totalInfo"></span>
+    </div>
+    <div class="note">Links repetidos são ignorados. Qualquer texto com http(s)://… é aceito, então pode subir o CSV inteiro.</div>
+  </div>
+
+  <div class="card">
+    <h2>3. Processamento</h2>
+    <div class="bar"><div id="prog"></div></div>
+    <div class="stats">
+      <div class="stat"><b id="sTotal">0</b><span>total de links</span></div>
+      <div class="stat"><b id="sDone">0</b><span>processados</span></div>
+      <div class="stat"><b class="ok" id="sOk">0</b><span>com CPF</span></div>
+      <div class="stat"><b class="warn" id="sNo">0</b><span>sem CPF</span></div>
+      <div class="stat"><b class="bad" id="sErr">0</b><span>com erro</span></div>
+      <div class="stat"><b id="sEta">–</b><span>tempo restante</span></div>
+    </div>
+    <div class="row">
+      <button id="btnStart">Iniciar / Continuar</button>
+      <button class="ghost" id="btnPause" disabled>Pausar</button>
+      <button class="ghost" id="btnRetry">Reprocessar erros</button>
+      <span class="spacer"></span>
+      <select id="filtro" style="width:auto" aria-label="Filtro da exportação">
+        <option value="all">Exportar: todos</option>
+        <option value="ok">Exportar: só com CPF</option>
+        <option value="bad">Exportar: só sem CPF / erros</option>
+      </select>
+      <button id="btnCsv">Baixar CSV</button>
+    </div>
+    <div class="note">O progresso fica salvo neste navegador: dá para fechar e continuar depois, no mesmo computador e na mesma pasta do arquivo.</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="margin-top:0"><h2 style="margin:0">Últimos resultados</h2><span class="spacer"></span>
+      <button class="ghost" id="btnClear">Limpar tudo</button></div>
+    <div class="scroll" style="margin-top:8px">
+      <table><thead><tr><th>Proposta</th><th>Nome</th><th>CPF</th><th>Telefone</th><th>Status</th></tr></thead>
+      <tbody id="tb"></tbody></table>
+    </div>
+  </div>
+</main>
+
+<script>
+(function(){
+  var $=function(id){return document.getElementById(id)};
+  var S={links:[],results:{},running:false,paused:false,cfg:{url:"",chunk:10,conc:2}};
+  var sessStart=0,sessDone=0,lastSave=0;
+
+  /* ---------- persistência (IndexedDB) ---------- */
+  function idb(){return new Promise(function(res,rej){var r=indexedDB.open("extrator-cpf-n8n",1);r.onupgradeneeded=function(){r.result.createObjectStore("kv")};r.onsuccess=function(){res(r.result)};r.onerror=function(){rej(r.error)}})}
+  async function kvGet(k){try{var db=await idb();return await new Promise(function(res,rej){var q=db.transaction("kv").objectStore("kv").get(k);q.onsuccess=function(){res(q.result)};q.onerror=function(){rej(q.error)}})}catch(e){return undefined}}
+  async function kvSet(k,v){try{var db=await idb();await new Promise(function(res,rej){var t=db.transaction("kv","readwrite");t.objectStore("kv").put(v,k);t.oncomplete=res;t.onerror=function(){rej(t.error)}})}catch(e){}}
+  function save(){lastSave=Date.now();return kvSet("state",{links:S.links,results:S.results,cfg:S.cfg})}
+
+  /* ---------- utilidades ---------- */
+  function sleep(ms){return new Promise(function(r){setTimeout(r,ms)})}
+  function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+  function msg(t,cls){var m=$("msg");m.textContent=t;m.className=cls||""}
+  function isErr(r){return r&&String(r.status).indexOf("erro")===0}
+  function isNoCpf(r){return r&&!isErr(r)&&r.status!=="ok"}
+  function norm(d){return{nome:d.nome||"",cpf:d.cpf||"",cpf_valido:d.cpf_valido||"",telefone:d.telefone||"",proposta:d.proposta||"",status:d.status||(d.cpf?"ok":"CPF não encontrado")}}
+  function fmtTime(s){if(!isFinite(s)||s<0)return"–";var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?h+"h "+m+"min":m?m+" min":Math.ceil(s)+" s"}
+
+  /* ---------- envio de um lote ---------- */
+  async function enviar(links){
+    var r=await fetch(S.cfg.url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({links:links})});
+    if(!r.ok)throw new Error("HTTP "+r.status);
+    var data=await r.json();
+    if(data&&!Array.isArray(data))data=Array.isArray(data.data)?data.data:[data];
+    return data||[];
+  }
+  async function processChunk(links){
+    for(var a=1;a<=3;a++){
+      try{
+        var data=await enviar(links),got={};
+        data.forEach(function(d){if(d&&d.link)got[d.link]=d});
+        links.forEach(function(l){S.results[l]=got[l]?norm(got[l]):{status:"erro: n8n não devolveu este link",nome:"",cpf:"",telefone:"",proposta:""}});
+        sessDone+=links.length;return;
+      }catch(e){
+        if(a===3){links.forEach(function(l){S.results[l]={status:"erro: "+e.message,nome:"",cpf:"",telefone:"",proposta:""}});sessDone+=links.length;return}
+        await sleep(2000*a);
+      }
+    }
+  }
+
+  async function start(){
+    if(S.running)return;
+    readCfg();
+    if(!/^https?:\/\//.test(S.cfg.url)){msg("Preencha a URL do webhook.","bad");return}
+    var pend=S.links.filter(function(l){return !S.results[l]});
+    if(!pend.length){msg("Nada pendente. Adicione links ou use “Reprocessar erros”.","muted");return}
+    var chunks=[];for(var i=0;i<pend.length;i+=S.cfg.chunk)chunks.push(pend.slice(i,i+S.cfg.chunk));
+    S.running=true;S.paused=false;sessStart=Date.now();sessDone=0;msg("");ui();
+    var idx=0;
+    async function worker(){
+      while(!S.paused){
+        var c=chunks[idx++];if(!c)break;
+        await processChunk(c);
+        if(Date.now()-lastSave>5000)save();
+      }
+    }
+    var ws=[];for(var w=0;w<S.cfg.conc;w++)ws.push(worker());
+    await Promise.all(ws);
+    S.running=false;await save();ui();
+    msg(S.paused?"Pausado. Clique em Iniciar / Continuar para seguir.":"Concluído.","ok");
+  }
+
+  /* ---------- interface ---------- */
+  function ui(){
+    var total=S.links.length,done=0,ok=0,no=0,er=0;
+    S.links.forEach(function(l){var r=S.results[l];if(!r)return;done++;if(isErr(r))er++;else if(isNoCpf(r))no++;else ok++});
+    $("sTotal").textContent=total;$("sDone").textContent=done;$("sOk").textContent=ok;$("sNo").textContent=no;$("sErr").textContent=er;
+    $("prog").style.width=(total?done/total*100:0)+"%";
+    var eta="–";
+    if(S.running&&sessDone>0){var rate=sessDone/((Date.now()-sessStart)/1000);eta=fmtTime((total-done)/rate)}
+    $("sEta").textContent=eta;
+    $("totalInfo").textContent=total?total+" link(s) na fila":"";
+    $("btnStart").disabled=S.running;$("btnPause").disabled=!S.running;$("btnRetry").disabled=S.running;
+    var keys=Object.keys(S.results).slice(-200).reverse();
+    $("tb").innerHTML=keys.map(function(l){var r=S.results[l],c=isErr(r)?"bad":isNoCpf(r)?"warn":"ok";
+      return "<tr><td>"+esc(r.proposta)+"</td><td>"+esc(r.nome)+"</td><td class='cpf'>"+esc(r.cpf)+"</td><td>"+esc(r.telefone)+"</td><td class='"+c+"'>"+esc(r.status)+"</td></tr>"}).join("");
+  }
+  function readCfg(){
+    S.cfg.url=$("url").value.trim();
+    S.cfg.chunk=Math.min(50,Math.max(1,parseInt($("chunk").value)||10));
+    S.cfg.conc=Math.min(6,Math.max(1,parseInt($("conc").value)||2));
+  }
+  function addLinks(text){
+    var found=text.match(/https?:\/\/[^\s",;<>]+/g)||[],set={},n=0;
+    S.links.forEach(function(l){set[l]=1});
+    found.forEach(function(l){if(!set[l]){set[l]=1;S.links.push(l);n++}});
+    save();ui();msg(n+" link(s) novo(s) adicionado(s). Ignorados repetidos: "+(found.length-n)+".","muted");
+  }
+
+  /* ---------- CSV ---------- */
+  function baixarCsv(){
+    var f=$("filtro").value,H=["proposta","nome","cpf","cpf_valido","telefone","status","link"];
+    var rows=S.links.filter(function(l){var r=S.results[l];if(!r)return false;
+      if(f==="ok")return !isErr(r)&&!isNoCpf(r);if(f==="bad")return isErr(r)||isNoCpf(r);return true})
+      .map(function(l){var r=S.results[l];return H.map(function(h){var v=h==="link"?l:r[h];return '"'+String(v==null?"":v).replace(/"/g,'""')+'"'}).join(";")});
+    if(!rows.length){msg("Não há linhas para exportar com esse filtro.","warn");return}
+    var blob=new Blob(["\ufeff"+H.join(";")+"\r\n"+rows.join("\r\n")],{type:"text/csv;charset=utf-8"});
+    var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="cpfs_extraidos.csv";document.body.appendChild(a);a.click();
+    setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1000);
+    msg(rows.length+" linha(s) exportada(s).","ok");
+  }
+
+  /* ---------- eventos ---------- */
+  $("btnAdd").onclick=function(){addLinks($("txt").value);$("txt").value=""};
+  $("btnFile").onclick=function(){$("file").click()};
+  $("file").onchange=function(){var f=$("file").files[0];if(!f)return;var r=new FileReader();r.onload=function(){addLinks(String(r.result))};r.readAsText(f);$("file").value=""};
+  $("btnStart").onclick=start;
+  $("btnPause").onclick=function(){S.paused=true;msg("Pausando ao fim dos lotes em andamento…","muted")};
+  $("btnRetry").onclick=function(){var n=0;Object.keys(S.results).forEach(function(l){if(isErr(S.results[l])){delete S.results[l];n++}});save();ui();msg(n+" link(s) com erro voltaram para a fila. Clique em Iniciar / Continuar.","muted")};
+  $("btnCsv").onclick=baixarCsv;
+  $("btnClear").onclick=function(){if(S.running||!confirm("Apagar todos os links e resultados salvos?"))return;S.links=[];S.results={};save();ui();msg("")};
+  ["url","chunk","conc"].forEach(function(id){$(id).onchange=function(){readCfg();save()}});
+  $("btnTest").onclick=async function(){
+    readCfg();
+    if(!/^https?:\/\//.test(S.cfg.url)){msg("Preencha a URL do webhook.","bad");return}
+    var link=S.links[0]||(($("txt").value.match(/https?:\/\/[^\s",;<>]+/)||[])[0]);
+    if(!link){msg("Adicione ao menos um link para testar.","warn");return}
+    msg("Testando com 1 link…","muted");
+    try{var d=(await enviar([link]))[0]||{};msg("Conexão OK.\nProposta: "+(d.proposta||"-")+"\nNome: "+(d.nome||"-")+"\nCPF: "+(d.cpf||"-")+"\nStatus: "+(d.status||"-"),d.cpf?"ok":"warn")}
+    catch(e){msg("Falhou: "+e.message+"\nConfira se o workflow está publicado (Production URL), se a URL está certa e se o Webhook tem CORS liberado.","bad")}
+  };
+  setInterval(function(){if(S.running)ui()},800);
+  window.addEventListener("beforeunload",function(e){if(S.running){e.preventDefault();e.returnValue=""}});
+
+  (async function init(){
+    var st=await kvGet("state");
+    if(st){S.links=st.links||[];S.results=st.results||{};S.cfg=Object.assign(S.cfg,st.cfg||{})}
+    $("url").value=S.cfg.url;$("chunk").value=S.cfg.chunk;$("conc").value=S.cfg.conc;ui();
+  })();
+})();
+</script>
+</body>
+</html>
