@@ -50,8 +50,8 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
     <div class="grid">
       <div><label for="url">URL do webhook (Production URL)</label>
         <input id="url" type="text" placeholder="https://seu-n8n.com/webhook/extrair-cpf"></div>
-      <div><label for="chunk">Links por lote</label><input id="chunk" type="number" min="1" max="50" value="10"></div>
-      <div><label for="conc">Lotes simultâneos</label><input id="conc" type="number" min="1" max="6" value="2"></div>
+      <div><label for="chunk">Links por lote</label><input id="chunk" type="number" min="1" max="100" value="20"></div>
+      <div><label for="conc">Lotes simultâneos</label><input id="conc" type="number" min="1" max="12" value="5"></div>
     </div>
     <div class="row"><button class="ghost" id="btnTest">Testar conexão</button></div>
     <div id="msg"></div>
@@ -78,6 +78,7 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
       <div class="stat"><b class="ok" id="sOk">0</b><span>com CPF</span></div>
       <div class="stat"><b class="warn" id="sNo">0</b><span>sem CPF</span></div>
       <div class="stat"><b class="bad" id="sErr">0</b><span>com erro</span></div>
+      <div class="stat"><b id="sRate">–</b><span>PDFs por minuto</span></div>
       <div class="stat"><b id="sEta">–</b><span>tempo restante</span></div>
     </div>
     <div class="row">
@@ -108,7 +109,7 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
 <script>
 (function(){
   var $=function(id){return document.getElementById(id)};
-  var S={links:[],results:{},running:false,paused:false,cfg:{url:"",chunk:10,conc:2}};
+  var S={links:[],results:{},running:false,paused:false,cfg:{url:"",chunk:20,conc:5}};
   var sessStart=0,sessDone=0,lastSave=0;
 
   /* ---------- persistência (IndexedDB) ---------- */
@@ -176,9 +177,9 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
     S.links.forEach(function(l){var r=S.results[l];if(!r)return;done++;if(isErr(r))er++;else if(isNoCpf(r))no++;else ok++});
     $("sTotal").textContent=total;$("sDone").textContent=done;$("sOk").textContent=ok;$("sNo").textContent=no;$("sErr").textContent=er;
     $("prog").style.width=(total?done/total*100:0)+"%";
-    var eta="–";
-    if(S.running&&sessDone>0){var rate=sessDone/((Date.now()-sessStart)/1000);eta=fmtTime((total-done)/rate)}
-    $("sEta").textContent=eta;
+    var eta="–",rpm="–";
+    if(S.running&&sessDone>0){var rate=sessDone/((Date.now()-sessStart)/1000);eta=fmtTime((total-done)/rate);rpm=Math.round(rate*60)}
+    $("sEta").textContent=eta;$("sRate").textContent=rpm;
     $("totalInfo").textContent=total?total+" link(s) na fila":"";
     $("btnStart").disabled=S.running;$("btnPause").disabled=!S.running;$("btnRetry").disabled=S.running;
     var keys=Object.keys(S.results).slice(-200).reverse();
@@ -187,8 +188,8 @@ td.cpf{font-weight:600;font-variant-numeric:tabular-nums}
   }
   function readCfg(){
     S.cfg.url=$("url").value.trim();
-    S.cfg.chunk=Math.min(50,Math.max(1,parseInt($("chunk").value)||10));
-    S.cfg.conc=Math.min(6,Math.max(1,parseInt($("conc").value)||2));
+    S.cfg.chunk=Math.min(100,Math.max(1,parseInt($("chunk").value)||20));
+    S.cfg.conc=Math.min(12,Math.max(1,parseInt($("conc").value)||5));
   }
   function addLinks(text){
     var found=text.match(/https?:\/\/[^\s",;<>]+/g)||[],set={},n=0;
